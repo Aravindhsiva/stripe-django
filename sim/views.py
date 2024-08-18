@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render, reverse
 from django.views.decorators.csrf import csrf_exempt
+from faker import Faker
 
 import stripe
 
@@ -41,6 +42,89 @@ def success(request) -> HttpResponse:
 
     return render(request, 'success.html')
 
+def create_customer(request) -> HttpResponse:
+    fakerInstance = Faker()
+    try:
+        customer = stripe.Customer.create(
+         name=fakerInstance.name(),
+         email=fakerInstance.safe_email()
+        )
+
+        intent =  stripe.SetupIntent.create(
+            customer = customer.id,
+            automatic_payment_methods={"enabled": True},
+        )
+        return JsonResponse(data={"customer":stripe.Customer.retrieve(id=customer.id), "secret":intent.client_secret})
+    except Exception as e:
+        print(e)
+
+@csrf_exempt
+def create_setup_intent(request) -> HttpResponse:
+    intent =  stripe.SetupIntent.create(
+        customer='cus_QgS3VjBqutfIDc',
+        automatic_payment_methods={"enabled": True},
+    )
+    return JsonResponse(data={"secret":intent.client_secret, "id":intent.id})
+
+def get_setup_intent(request) -> HttpResponse:
+    intent =  stripe.SetupIntent.retrieve(
+        id="seti_1Pp7EWIbUvrwkR54cRU6HG0s"
+    )
+    return JsonResponse(data=intent)
+
+def set_default_payment_method(request)-> HttpResponse:
+    customer = stripe.Customer.modify('cus_Qga3eizvKT80os',invoice_settings={'default_payment_method':"pm_1PpCuDIbUvrwkR54Mo7DOpqJ"})
+    return JsonResponse(customer)
+
+@csrf_exempt
+def create_subscription(request) -> HttpResponse:
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+        price_lookup_key = body['price_lookup_key']
+        customer_id = body['customer_id']
+        prices = stripe.Price.list(lookup_keys=[price_lookup_key], expand=['data.product'])
+        price_item = prices.data[0]
+        preferred_method = stripe.Customer.retrieve(customer_id).invoice_settings.default_payment_method
+        print(preferred_method)
+
+        subscription = stripe.Subscription.create(
+            customer=customer_id,
+            items=[{"price": price_item.id}],
+            default_payment_method=preferred_method
+        )
+        return JsonResponse(subscription)
+    except Exception as e:
+        print(e)
+        return JsonResponse(data={"error":e.args})
+
+@csrf_exempt
+def create_charge(request) -> HttpResponse:
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+        customer_id = body['customer_id']
+        preferred_method = stripe.Customer.retrieve(customer_id).invoice_settings.default_payment_method
+        print(preferred_method)
+        charge = stripe.PaymentIntent.create(
+            amount=7000,
+            currency='eur',
+            customer=customer_id,
+            payment_method=preferred_method,
+            off_session=True,
+            confirm=True
+        )
+
+        # We connect the checkout session to the user who initiated the checkout.
+        # models.CheckoutSessionRecord.objects.create(
+        #     user=request.user,
+        #     stripe_checkout_session_id=checkout_session.id,
+        #     stripe_price_id=price_item.id,
+        # )
+        return JsonResponse(charge)
+    except Exception as e:
+        print(e)
+        return JsonResponse(data={"error":e.args})
+
+
 
 def create_checkout_session(request) -> HttpResponse:
     price_lookup_key = request.POST['price_lookup_key']
@@ -54,6 +138,7 @@ def create_checkout_session(request) -> HttpResponse:
                 # You could add differently priced services here, e.g., standard, business, first-class.
             ],
             mode='subscription',
+            customer="cus_QgF50ztItICaYM",
             success_url=DOMAIN + reverse('success') + '?session_id={CHECKOUT_SESSION_ID}',
             cancel_url=DOMAIN + reverse('cancel')
         )
@@ -144,3 +229,7 @@ def _update_record(webhook_event) -> None:
         checkout_record.has_access = False
         checkout_record.save()
         print('✋ Subscription canceled: %s', data_object.id)
+    elif event_type == 'payment_method.attached':
+        print("Payment Method Attached, Body : %s", data_object)
+    else:
+        print(f'Got an event : {event_type}')
